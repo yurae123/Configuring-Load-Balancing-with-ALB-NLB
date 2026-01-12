@@ -1,0 +1,317 @@
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances. Linked to AWS Parameter
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  InstanceType:
+    Description: Enter t3.small, t3.medium. Default is t3.medium.
+    Type: String
+    Default: t3.medium
+    AllowedValues: 
+      - t3.small
+      - t3.medium
+  LatestAmiId:
+    Description: (DO NOT CHANGE)
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    AllowedValues:
+      - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+Resources:
+# IAM Role Instance Profile
+  WPHa1LabInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: WPHa1LabInstanceRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  WPHa1LabInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: WPHa1LabInstanceProfile
+      Path: /
+      Roles:
+        - !Ref WPHa1LabInstanceRole
+
+# VPC1 Resource
+  VPC1:
+    Type: AWS::EC2::VPC
+    Properties:
+     CidrBlock: 10.1.0.0/16
+     EnableDnsSupport: true
+     EnableDnsHostnames: true
+     Tags:
+      - Key: Name
+        Value: WP-VPC1
+  VPC1InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: WP-VPC1-IGW
+  VPC1InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref VPC1InternetGateway
+      VpcId: !Ref VPC1
+
+  VPC1RouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+      Tags:
+        - Key: Name
+          Value: WP-VPC1-PublicRT
+  VPC1RouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+      Tags:
+        - Key: Name
+          Value: WP-VPC1-PrivateRT
+
+  VPC1Route1:
+    Type: AWS::EC2::Route
+    DependsOn: VPC1InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref VPC1RouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VPC1InternetGateway
+
+  VPC1Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.1.1.0/24
+      Tags:
+        - Key: Name
+          Value: WP-VPC1-Subnet1
+  VPC1Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VPC1RouteTable1
+      SubnetId: !Ref VPC1Subnet1
+  VPC1Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.1.2.0/24
+      Tags:
+        - Key: Name
+          Value: WP-VPC1-Subnet2
+  VPC1Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref VPC1RouteTable1
+      SubnetId: !Ref VPC1Subnet2
+
+# Security Group
+  VPC1SG1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC1
+      GroupDescription: SGWebSrv
+      Tags:
+      - Key : Name
+        Value : SGWebSrv
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+
+  VPC1SG2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC1
+      GroupDescription: SGALB
+      Tags:
+      - Key : Name
+        Value : SGALB
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: 0.0.0.0/0
+
+# ALB
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Name: ALB-WP
+      SecurityGroups:
+        - !Ref VPC1SG2
+      Subnets:
+        - !Ref VPC1Subnet1
+        - !Ref VPC1Subnet2
+
+  ALBTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: ALB-TG
+      Port: 80
+      Protocol: HTTP
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      Targets:
+        - Id: !Ref VPC1Instance1
+          Port: 80
+      TargetGroupAttributes: 
+      - Key : deregistration_delay.timeout_seconds
+        Value : '60'
+      VpcId: !Ref VPC1
+      Tags:
+      - Key : Name
+        Value : VPC1-ALBTG
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTG
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+# Instances1
+  VPC1Instance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile : WPHa1LabInstanceProfile
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      Tags:
+        - Key: Name
+          Value: AllInOne
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          SubnetId: !Ref VPC1Subnet1
+          GroupSet:
+          - !Ref VPC1SG1
+          PrivateIpAddress: 10.1.1.10
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          hostnamectl --static set-hostname AllInOne
+          echo "sudo su -" >> /home/ec2-user/.bashrc
+
+          # Install Apache
+          yum update -y
+          yum install jq htop tree gcc amazon-efs-utils mariadb -y
+          yum install httpd -y
+          systemctl start httpd && systemctl enable httpd
+
+          # Install PHP
+          amazon-linux-extras install php8.2 -y
+          yum install -y php-xml php-mbstring ImageMagick ImageMagick-devel php-pear php-devel
+          printf "\n" | pecl install imagick
+          echo "extension = imagick.so" > /etc/php.d/40-imagick.ini
+          systemctl restart php-fpm && systemctl restart httpd
+
+          # Make Directory
+          mkdir -p /var/www/wordpress/
+          echo "<?php phpinfo(); ?>" > /var/www/wordpress/info.php
+
+          # Install Mariadb
+          amazon-linux-extras install mariadb10.5 -y
+          systemctl start mariadb && systemctl enable mariadb
+          echo -e "\n n\n n\n Y\n n\n Y\n Y\n" | /usr/bin/mysql_secure_installation
+          mysql -e "set password = password('qwe12345');"
+          mysql -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY 'qwe12345';"
+          mysql -e "CREATE DATABASE wordpressdb"
+          systemctl restart mariadb
+
+          # Install Wordpress
+          wget https://wordpress.org/wordpress-6.3.zip
+          unzip wordpress-6.3.zip
+          cp wordpress/wp-config-sample.php wordpress/wp-config.php
+          sed -i "s/database_name_here/wordpressdb/g" wordpress/wp-config.php
+          sed -i "s/username_here/root/g" wordpress/wp-config.php
+          sed -i "s/password_here/qwe12345/g" wordpress/wp-config.php
+          cp -r wordpress/* /var/www/wordpress/
+          chown -R apache:apache /var/www
+          chmod 2775 /var/www
+          find /var/www -type d -exec chmod 2775 {} \;
+          find /var/www -type f -exec chmod 0664 {} \;
+          chmod u+wrx /var/www/wordpress/wp-content/*
+          echo 'ServerName 127.0.0.1:80' >> /etc/httpd/conf.d/MyBlog.conf
+          echo 'DocumentRoot /var/www/wordpress' >> /etc/httpd/conf.d/MyBlog.conf
+          echo '<Directory /var/www/wordpress>' >> /etc/httpd/conf.d/MyBlog.conf
+          echo '  Options Indexes FollowSymLinks' >> /etc/httpd/conf.d/MyBlog.conf
+          echo '  AllowOverride All' >> /etc/httpd/conf.d/MyBlog.conf
+          echo '  Require all granted' >> /etc/httpd/conf.d/MyBlog.conf
+          echo '</Directory>' >> /etc/httpd/conf.d/MyBlog.conf
+          systemctl restart php-fpm && systemctl restart httpd
+
+# CloudFront
+  MyCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: ALB
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt ALB.DNSName
+          Id: elb
+          CustomOriginConfig:
+            OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          DefaultTTL: 0
+          MaxTTL: 0
+          MinTTL: 0
+          ForwardedValues:
+            Headers:
+            - '*'
+            Cookies:
+              Forward: all
+            QueryString: true
+          TargetOriginId: elb
+          ViewerProtocolPolicy: allow-all
+          Compress: true
+        Comment: WordPress CDN
+        Enabled: true
+        PriceClass: PriceClass_200
+        IPV6Enabled: false
+
+# Output
+Outputs:
+  CloudFrontDNS:
+    Description: CloudFront DNS address
+    Value: !Join ['', ['http://', !GetAtt MyCloudFrontDistribution.DomainName]]
